@@ -29,14 +29,15 @@ def get_engine():
 
 
 @st.cache_data(show_spinner=False)
-def load_data(engine, min_rating: float):
+def load_data(_engine, min_rating: float):
+    """Load restaurant data from PostgreSQL."""
     query = """
         SELECT "Restaurant ID", "Restaurant Name", "Cuisines", 
                "Price range", "Aggregate rating", "Votes"
         FROM restaurants
         WHERE "Aggregate rating" >= %(min_rating)s
     """
-    df = pd.read_sql(query, engine, params={"min_rating": min_rating})
+    df = pd.read_sql(query, _engine, params={"min_rating": min_rating})
 
     if df.empty:
         return df
