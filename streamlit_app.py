@@ -153,16 +153,6 @@ try:
             mime="text/csv"
         )
 
-    with st.expander("How similarity is computed"):
-        st.markdown(
-            """
-            We create a binary matrix of restaurants × cuisines, then compute **Jaccard similarity**:
-
-            $\\text{sim}(A,B) = \\frac{|A \\cap B|}{|A \\cup B|}$.
-
-            This is implemented with pure NumPy (no SciPy), so it runs smoothly on Streamlit Cloud.
-            """
-        )
 
     with st.expander("Preview first 10 restaurants"):
         st.dataframe(meta.reset_index().head(10), use_container_width=True)
