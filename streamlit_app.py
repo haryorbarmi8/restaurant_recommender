@@ -1,40 +1,46 @@
 # streamlit_app.py
 # -------------------------------------------------------------
-# Restaurant Recommender (pure NumPy/Pandas — no SciPy needed)
-# Deployable on Streamlit Community Cloud
+# Restaurant Recommender with PostgreSQL backend (secure connection)
 # -------------------------------------------------------------
 
 import io
 import numpy as np
 import pandas as pd
 import streamlit as st
+import sqlalchemy
+import urllib.parse
 
 st.set_page_config(page_title="🍽️ Restaurant Recommender", page_icon="🍽️", layout="wide")
 
 # ---------------------------
-# Helpers
+# Database Connection (from secrets)
 # ---------------------------
+@st.cache_resource(show_spinner=False)
+def get_engine():
+    """Create a SQLAlchemy engine for PostgreSQL using Streamlit secrets."""
+    user = st.secrets["postgres"]["user"]
+    password = urllib.parse.quote_plus(st.secrets["postgres"]["password"])
+    host = st.secrets["postgres"]["host"]
+    port = st.secrets["postgres"].get("port", 5432)
+    dbname = st.secrets["postgres"]["dbname"]
+
+    db_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+    return sqlalchemy.create_engine(db_url)
+
+
 @st.cache_data(show_spinner=False)
-def load_data(file_bytes: bytes | None):
-    if file_bytes is not None:
-        df = pd.read_csv(io.BytesIO(file_bytes))
-    else:
-        try:
-            df = pd.read_csv("Cognify1.csv")
-        except Exception as e:
-            raise FileNotFoundError(
-                "No data found. Upload a CSV or place 'Cognify1.csv' in the app folder.") from e
+def load_data(engine, min_rating: float):
+    query = """
+        SELECT "Restaurant ID", "Restaurant Name", "Cuisines", 
+               "Price range", "Aggregate rating", "Votes"
+        FROM restaurants
+        WHERE "Aggregate rating" >= %(min_rating)s
+    """
+    df = pd.read_sql(query, engine, params={"min_rating": min_rating})
 
-    required_cols = [
-        'Restaurant ID', 'Restaurant Name', 'Cuisines',
-        'Price range', 'Aggregate rating', 'Votes'
-    ]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(
-            f"CSV must contain columns: {required_cols}. Missing: {missing}")
+    if df.empty:
+        return df
 
-    df = df[required_cols].copy()
     df['Aggregate rating'] = pd.to_numeric(df['Aggregate rating'], errors='coerce')
     df['Price range'] = pd.to_numeric(df['Price range'], errors='coerce')
     df['Votes'] = pd.to_numeric(df['Votes'], errors='coerce')
@@ -50,10 +56,9 @@ def load_data(file_bytes: bytes | None):
 
 
 @st.cache_data(show_spinner=False)
-def preprocess(df: pd.DataFrame, min_rating: float):
-    dff = df[df['Aggregate rating'] >= float(min_rating)].copy()
-    tokens = dff['Cuisines'].str.split(r',\s*', regex=True)
-    df_exp = dff.assign(Cuisines=tokens).explode('Cuisines')
+def preprocess(df: pd.DataFrame):
+    tokens = df['Cuisines'].str.split(r',\s*', regex=True)
+    df_exp = df.assign(Cuisines=tokens).explode('Cuisines')
     df_exp['Cuisines'] = df_exp['Cuisines'].astype(str).str.strip()
     df_exp = df_exp[df_exp['Cuisines'] != '']
 
@@ -61,15 +66,16 @@ def preprocess(df: pd.DataFrame, min_rating: float):
     restoXcuisines = (restoXcuisines > 0).astype(np.uint8)
 
     meta = (
-        dff.sort_values(['Restaurant Name', 'Aggregate rating'], ascending=[True, False])
-           .drop_duplicates('Restaurant Name', keep='first')
-           .set_index('Restaurant Name')
-           [['Aggregate rating', 'Price range', 'Votes', 'Restaurant ID']]
+        df.sort_values(['Restaurant Name', 'Aggregate rating'], ascending=[True, False])
+          .drop_duplicates('Restaurant Name', keep='first')
+          .set_index('Restaurant Name')
+          [['Aggregate rating', 'Price range', 'Votes', 'Restaurant ID']]
     )
 
-    cuisine_lists = (df_exp.groupby('Restaurant Name')['Cuisines']
-                          .agg(lambda s: sorted(set(x for x in s if isinstance(x, str) and x.strip())))
-                    )
+    cuisine_lists = (
+        df_exp.groupby('Restaurant Name')['Cuisines']
+              .agg(lambda s: sorted(set(x for x in s if isinstance(x, str) and x.strip())))
+    )
 
     return restoXcuisines, meta, cuisine_lists
 
@@ -93,37 +99,27 @@ def jaccard_sim(crosstab: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------
 # UI
 # ---------------------------
-st.title("🍽️ Restaurant Recommender")
-st.caption("Select a restaurant to get similar picks based on shared cuisines and compare ratings.")
+st.title("🍽️ Restaurant Recommender (PostgreSQL)")
+st.caption("Find restaurants that match your taste, always updated from the database.")
 
 with st.sidebar:
-    st.header("Data")
-    uploaded = st.file_uploader("Upload your restaurant CSV", type=["csv"])
-    file_bytes = uploaded.getvalue() if uploaded else None
-
     st.header("Filters")
     min_rating = st.slider("Minimum aggregate rating", 0.0, 5.0, 4.0, 0.1)
     min_sim = st.slider("Minimum similarity", 0.0, 1.0, 0.7, 0.05)
     k = st.slider("# of recommendations", 1, 20, 5)
 
 try:
-    df = load_data(file_bytes)
-    crosstab, meta, cuisine_lists = preprocess(df, min_rating)
-    sim_df = jaccard_sim(crosstab)
+    engine = get_engine()
+    df = load_data(engine, min_rating)
 
-    if sim_df.empty:
-        st.warning("No restaurants left after filtering. Lower the rating threshold or upload a different dataset.")
+    if df.empty:
+        st.warning("No restaurants meet the rating filter. Add more data or lower the filter.")
         st.stop()
 
-    restaurant = st.selectbox("Choose a restaurant:", sorted(sim_df.index))
+    crosstab, meta, cuisine_lists = preprocess(df)
+    sim_df = jaccard_sim(crosstab)
 
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.metric("Restaurants", len(sim_df.index))
-    with m2:
-        st.metric("Unique cuisines", crosstab.shape[1])
-    with m3:
-        st.metric("Min rating filter", f"{min_rating:.1f}")
+    restaurant = st.selectbox("Choose a restaurant:", sorted(sim_df.index))
 
     if restaurant:
         sims = sim_df.loc[restaurant].sort_values(ascending=False).drop(index=restaurant)
@@ -153,10 +149,6 @@ try:
             mime="text/csv"
         )
 
-
-    with st.expander("Preview first 10 restaurants"):
-        st.dataframe(meta.reset_index().head(10), use_container_width=True)
-
 except Exception as e:
     st.error(f"Error: {e}")
-    st.info("Tip: Ensure the CSV has columns: Restaurant ID, Restaurant Name, Cuisines, Price range, Aggregate rating, Votes.")
+    st.info("Tip: Make sure your PostgreSQL database has a 'restaurants' table with columns: Restaurant ID, Restaurant Name, Cuisines, Price range, Aggregate rating, Votes.")
